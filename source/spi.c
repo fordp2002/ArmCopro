@@ -47,37 +47,34 @@ void spi_begin(void)
  	SPI0_CLK = 1024;       																// Set clock to 250kHz
 }
 
-unsigned int spi_transfer(unsigned char value)
+void spi_transfer(u8* TxBuff, u8* RxBuff, u32 Length)
 {
-	unsigned int var = 0;
-	unsigned int ret = 0;
+	SPI0_CONTROL |= BIT(SPI_C_CLEAR_RX) | BIT(SPI_C_CLEAR_TX) | BIT(SPI_C_TA);		// Clear TX and RX FIFOs and enable SPI
 
-	var = SPI0_CONTROL;
-	var|= BIT(SPI_C_CLEAR_RX) | BIT(SPI_C_CLEAR_TX);							// Clear TX and RX fifos
-	var|= BIT(SPI_C_TA);																	// Set TA = 1
-
-	SPI0_CONTROL =var;																	// Write back updated value
-
-	var = SPI0_CONTROL;																	// Maybe wait for TXD
-
-	while (!(var & BIT(SPI_C_TXD)))
+	while (Length--)
 	{
-		wait(1000000);   
+		while ((SPI0_CONTROL & BIT(SPI_C_TXD)) == 0)								// Wait for space in the FIFO
+		{
+			continue;
+		}
+
+		SPI0_FIFO = *(TxBuff++);														// Write to TX FIFO
+
+		while (SPI0_CONTROL & BIT(SPI_C_RXD))
+		{
+			*(RxBuff++) = SPI0_FIFO;													// Read RX FIFO
+		}
 	}
 
-	SPI0_FIFO = value;																	// Write to TX FIFO
+	while ((SPI0_CONTROL & BIT(SPI_C_DONE)) == 0)								// While not done
+	{
+		if (SPI0_CONTROL & BIT(SPI_C_RXD))
+		{
+			*(RxBuff++) = SPI0_FIFO;													// Read RX FIFO as we go
+		}
+	}
 
-	//while (!(var & BIT(SPI_C_DONE)))												// Wait for DONE to be set
-
-	wait(1000000); 
-	
-	ret = SPI0_FIFO;																		// Read RX FIFO
-
-  	var = SPI0_CONTROL;																	// Set TA = 0
-	var &= ~BIT(SPI_C_TA);
-	SPI0_CONTROL =var;																	// Write back updated value
-
-   return ret;
+  	SPI0_CONTROL &= ~BIT(SPI_C_TA);													// Set TA = 0
 }
 
 void spi_end(void)																		// Set all the SPI0 pins back to input

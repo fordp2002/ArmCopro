@@ -3,6 +3,8 @@
 #ifndef SPI_H
 #define SPI_H
 
+typedef unsigned char u8;
+typedef unsigned char u32;
 typedef volatile unsigned int v32;
 #define REG32(in) *((v32*) in)
 
@@ -50,6 +52,6 @@ typedef volatile unsigned int v32;
 
 extern void wait(unsigned int delay);
 extern void spi_begin(void);
-extern unsigned int spi_transfer(unsigned char value);
+extern void spi_transfer(u8* TxBuff, u8* RxBuff, u32 Length);
 extern void spi_end(void);
 #endif

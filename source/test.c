@@ -2,17 +2,17 @@
 
 #include "spi.h"
 
+u8 TxBuf[] = "\0Acorn Risk Machine!";
+u8 RxBuf[sizeof(TxBuf)];
+
 int notmain(void)
 {
-	unsigned char data = 0;
-	unsigned char ret;
-
 	while (1)
 	{
 		spi_begin();
-		ret = spi_transfer(data++);
+		spi_transfer(TxBuf, RxBuf, sizeof(TxBuf));
 		spi_end();
-		wait(10000000);
+		wait(1000000);
 	}
 
 	return 0;
