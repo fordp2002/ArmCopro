@@ -1,6 +1,8 @@
 *.hex
 *.lst
 *.list
-*.img
 *.elf
 *.o
+.cproject
+.project
+/.settings
