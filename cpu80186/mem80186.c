@@ -29,7 +29,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #ifdef DECLARE_RAM
 uint8_t RAM[ONE_MEG];
 #else
-uint8_t* RAM = 0x10000;
+uint8_t* RAM = (uint8_t*) 0x10000;
 #endif
 
 void write86(uint32_t addr32, uint8_t value)

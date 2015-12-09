@@ -1,5 +1,8 @@
 // spi.c
 
+#include <stdint.h>
+#include <stdio.h>
+
 #include "spi.h"
 #define BIT(in)	(1 << (in))	
 
@@ -71,6 +74,44 @@ void spi_transfer(u8* TxBuff, u8* RxBuff, u32 Length)
 	}
 
   	SPI0_CONTROL &= ~BIT(SPI_C_TA);													// Set TA = 0
+}
+
+void spi_out(uint16_t portnum, uint8_t Data)
+{
+	SPI0_CONTROL |= BIT(SPI_C_CLEAR_RX) | BIT(SPI_C_CLEAR_TX) | BIT(SPI_C_TA);		// Clear TX and RX FIFOs and enable SPI
+
+	SPI0_FIFO = portnum;
+	SPI0_FIFO = Data;
+
+	while ((SPI0_CONTROL & BIT(SPI_C_DONE)) == 0)								// While not done
+	{
+		continue;
+	}
+
+	SPI0_CONTROL |= BIT(SPI_C_CLEAR_RX) | BIT(SPI_C_CLEAR_TX);				// Clear TX and RX FIFOs and enable SPI
+  	SPI0_CONTROL &= ~BIT(SPI_C_TA);													// Set TA = 0
+}
+
+uint8_t spi_in(uint16_t portnum)
+{
+	uint8_t Dummy, Result;
+
+	SPI0_CONTROL |= BIT(SPI_C_CLEAR_RX) | BIT(SPI_C_CLEAR_TX) | BIT(SPI_C_TA);		// Clear TX and RX FIFOs and enable SPI
+
+	SPI0_FIFO = portnum;
+	SPI0_FIFO = 0x00;
+
+	while ((SPI0_CONTROL & BIT(SPI_C_DONE)) == 0)								// While not done
+	{
+		continue;
+	}
+
+	Dummy		= SPI0_FIFO;
+	Result	= SPI0_FIFO;
+
+	SPI0_CONTROL |= BIT(SPI_C_CLEAR_RX) | BIT(SPI_C_CLEAR_TX);				// Clear TX and RX FIFOs and enable SPI
+  	SPI0_CONTROL &= ~BIT(SPI_C_TA);													// Set TA = 0
+  	return Result;
 }
 
 void spi_end(void)																		// Set all the SPI0 pins back to input

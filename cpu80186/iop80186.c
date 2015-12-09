@@ -25,10 +25,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 //#include "config.h"
 #include <stdint.h>
 #include <stdio.h>
-#include <tube.h>
+#include "../source/tube.h"
 #include "iop80186.h"
 
-#define TUBE_ACCESS(ADDRESS)	((ADDRESS) & 0xFFF1) == 0x0080)
+#define TUBE_ACCESS(ADDRESS)	(((ADDRESS) & 0xFFF1) == 0x0080)
 #define TUBE_CONVERT(PORT) 	((PORT >> 1) & 0x0007)
 
 // I/O locations

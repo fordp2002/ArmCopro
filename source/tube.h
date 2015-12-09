@@ -1,2 +1,6 @@
-extern uint8_t tube_read(uint16_t Address);
-extern void tube_write(uint16_t Address, uint8_t Data);
+#include "spi.h"
+#define CMD_WRITE 0x80
+#define CMD_READ  0xC0
+
+#define tube_read(Address)				spi_in(CMD_READ | ((Address) << 3))
+#define tube_write(Address, Data)	spi_out((CMD_WRITE | ((Address) << 3)), (Data))
