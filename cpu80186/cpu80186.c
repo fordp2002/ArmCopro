@@ -22,17 +22,19 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 // Soft 80186 Second Processor
 // Copyright (C)2015-2016 Simon R. Ellwood BEng (FordP)
 
-#include "config.h"
+//#include "config.h"
 #include <stdint.h>
 #include <stdio.h>
-#include "cpu.h"
+#include "cpu80186.h"
 #include "mem80186.h"
+#include "iop80186.h"
 
 uint64_t curtimer, lasttimer, timerfreq;
 
 uint8_t byteregtable[8] = { regal, regcl, regdl, regbl, regah, regch, regdh, regbh };
 
-static const uint8_t parity[0x100] = {
+static const uint8_t parity[0x100] =
+{
 	1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
 	0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
 	0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
@@ -63,9 +65,7 @@ extern uint8_t verbose;
 
 extern void vidinterrupt();
 
-extern uint8_t readVGA (uint32_t addr32);
-
-void intcall86 (uint8_t intnum);
+void intcall86(uint8_t intnum);
 
 #define makeflagsword() \
 	(\
@@ -85,12 +85,6 @@ void intcall86 (uint8_t intnum);
 	df = (temp16 >> 10) & 1; \
 	of = (temp16 >> 11) & 1; \
 }
-
-extern void	writeVGA (uint32_t addr32, uint8_t value);
-extern void	portout (uint16_t portnum, uint8_t value);
-extern void	portout16 (uint16_t portnum, uint16_t value);
-extern uint8_t	portin (uint16_t portnum);
-extern uint16_t portin16 (uint16_t portnum);
 
 void flag_szp8 (uint8_t value) {
 	if (!value) {
@@ -1186,7 +1180,7 @@ void intcall86 (uint8_t intnum) {
 
 	switch (intnum) {
 	case 0x10:
-		updatedscreen = 1;
+		//updatedscreen = 1;
 		if ((regs.byteregs[regah]==0x00) || (regs.byteregs[regah]==0x10)) {
 			oldregax = regs.wordregs[regax];
 			vidinterrupt();
@@ -1248,14 +1242,17 @@ extern struct netstruct {
 #endif
 uint64_t	frametimer = 0, didwhen = 0, didticks = 0;
 uint32_t	makeupticks = 0;
-extern float	timercomp;
+
 uint64_t	timerticks = 0, realticks = 0;
 uint64_t	lastcountertimer = 0, counterticks = 10000;
-extern uint8_t	nextintr();
+
+//extern float	timercomp;
+//extern uint8_t	nextintr();
+
 extern void	timing();
 
-void exec86(uint32_t execloops) {
-
+void exec86(uint32_t execloops)
+{
 	uint32_t	loopcount;
 	uint8_t	docontinue;
 	static uint16_t firstip;
@@ -1278,9 +1275,13 @@ void exec86(uint32_t execloops) {
 			trap_toggle = 0;
 		}
 
-		if (!trap_toggle && (ifl && (i8259.irr & (~i8259.imr)))) {
+#warning To Do Interrupts
+#if 0
+		if (!trap_toggle && (ifl && (i8259.irr & (~i8259.imr))))
+		{
 			intcall86 (nextintr());	/* get next interrupt from the i8259, if any */
 		}
+#endif
 
 		reptype = 0;
 		segoverride = 0;

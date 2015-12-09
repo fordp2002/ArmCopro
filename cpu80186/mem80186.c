@@ -20,13 +20,17 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 // Soft 80186 Second Processor
 // Copyright (C)2015-2016 Simon R. Ellwood BEng (FordP)
 
-#include "config.h"
+//#include "config.h"
 #include <stdint.h>
 #include <stdio.h>
-#include "cpu.h"
+#include "cpu80186.h"
 #include "mem80186.h"
 
+#ifdef DECLARE_RAM
 uint8_t RAM[ONE_MEG];
+#else
+uint8_t* RAM = 0x10000;
+#endif
 
 void write86(uint32_t addr32, uint8_t value)
 {
