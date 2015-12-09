@@ -39,8 +39,8 @@ void write86(uint32_t addr32, uint8_t value)
 
 void writew86(uint32_t addr32, uint16_t value) 
 {
-	write86 (addr32, (uint8_t) value);
-	write86 (addr32 + 1, (uint8_t) (value >> 8));
+	write86(addr32, (uint8_t) value);
+	write86(addr32 + 1, (uint8_t) (value >> 8));
 }
 
 uint8_t read86(uint32_t addr32)
