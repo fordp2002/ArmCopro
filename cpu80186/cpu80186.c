@@ -19,16 +19,15 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 /* cpu.c: functions to emulate the 8086/V20 CPU in software. the heart of Fake86. */
 
+// Soft 80186 Second Processor
+// Copyright (C)2015-2016 Simon R. Ellwood BEng (FordP)
+
 #include "config.h"
 #include <stdint.h>
 #include <stdio.h>
 #include "cpu.h"
-#include "i8259.h"
-#include "i8253.h"
+#include "mem80186.h"
 
-extern struct i8253_s i8253;
-
-extern struct structpic i8259;
 uint64_t curtimer, lasttimer, timerfreq;
 
 uint8_t byteregtable[8] = { regal, regcl, regdl, regbl, regah, regch, regdh, regbh };
@@ -44,7 +43,6 @@ static const uint8_t parity[0x100] = {
 	0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1
 };
 
-uint8_t	RAM[0x100000], readonly[0x100000];
 uint8_t	opcode, segoverride, reptype, bootdrive = 0, hdcount = 0;
 uint16_t segregs[4], savecs, saveip, ip, useseg, oldsp;
 uint8_t	tempcf, oldcf, cf, pf, af, zf, sf, tf, ifl, df, of, mode, reg, rm;
@@ -54,8 +52,6 @@ uint32_t temp1, temp2, temp3, temp4, temp5, temp32, tempaddr32, ea;
 int32_t	result;
 uint64_t totalexec;
 
-extern uint16_t	VGA_SC[0x100], VGA_CRTC[0x100], VGA_ATTR[0x100], VGA_GC[0x100];
-extern uint8_t updatedscreen;
 union _bytewordregs_ regs;
 
 uint8_t	portram[0x10000];
@@ -72,7 +68,7 @@ extern uint8_t readVGA (uint32_t addr32);
 void intcall86 (uint8_t intnum);
 
 #define makeflagsword() \
-	( \
+	(\
 	2 | (uint16_t) cf | ((uint16_t) pf << 2) | ((uint16_t) af << 4) | ((uint16_t) zf << 6) | ((uint16_t) sf << 7) | \
 	((uint16_t) tf << 8) | ((uint16_t) ifl << 9) | ((uint16_t) df << 10) | ((uint16_t) of << 11) \
 	)
@@ -95,60 +91,6 @@ extern void	portout (uint16_t portnum, uint8_t value);
 extern void	portout16 (uint16_t portnum, uint16_t value);
 extern uint8_t	portin (uint16_t portnum);
 extern uint16_t portin16 (uint16_t portnum);
-
-void write86 (uint32_t addr32, uint8_t value) {
-	tempaddr32 = addr32 & 0xFFFFF;
-	if (readonly[tempaddr32] || (tempaddr32 >= 0xC0000) ) {
-		return;
-	}
-
-	if ( (tempaddr32 >= 0xA0000) && (tempaddr32 <= 0xBFFFF) ) {
-		if ( (vidmode != 0x13) && (vidmode != 0x12) && (vidmode != 0xD) && (vidmode != 0x10) ) {
-			RAM[tempaddr32] = value;
-			updatedscreen = 1;
-		}
-		else if ( ( (VGA_SC[4] & 6) == 0) && (vidmode != 0xD) && (vidmode != 0x10) && (vidmode != 0x12) ) {
-			RAM[tempaddr32] = value;
-			updatedscreen = 1;
-		}
-		else {
-			writeVGA (tempaddr32 - 0xA0000, value);
-		}
-
-		updatedscreen = 1;
-	}
-	else {
-		RAM[tempaddr32] = value;
-	}
-}
-
-void writew86 (uint32_t addr32, uint16_t value) {
-	write86 (addr32, (uint8_t) value);
-	write86 (addr32 + 1, (uint8_t) (value >> 8) );
-}
-
-uint8_t read86 (uint32_t addr32) {
-	addr32 &= 0xFFFFF;
-	if ( (addr32 >= 0xA0000) && (addr32 <= 0xBFFFF) ) {
-		if ( (vidmode == 0xD) || (vidmode == 0xE) || (vidmode == 0x10) ) return (readVGA (addr32 - 0xA0000) );
-		if ( (vidmode != 0x13) && (vidmode != 0x12) && (vidmode != 0xD) ) return (RAM[addr32]);
-		if ( (VGA_SC[4] & 6) == 0)
-			return (RAM[addr32]);
-		else
-			return (readVGA (addr32 - 0xA0000) );
-	}
-
-	if (!didbootstrap) {
-		RAM[0x410] = 0x41; //ugly hack to make BIOS always believe we have an EGA/VGA card installed
-		RAM[0x475] = hdcount; //the BIOS doesn't have any concept of hard drives, so here's another hack
-	}
-
-	return (RAM[addr32]);
-}
-
-uint16_t readw86 (uint32_t addr32) {
-	return ( (uint16_t) read86 (addr32) | (uint16_t) (read86 (addr32 + 1) << 8) );
-}
 
 void flag_szp8 (uint8_t value) {
 	if (!value) {
@@ -204,8 +146,8 @@ void flag_adc8 (uint8_t v1, uint8_t v2, uint8_t v3) {
 	uint16_t	dst;
 
 	dst = (uint16_t) v1 + (uint16_t) v2 + (uint16_t) v3;
-	flag_szp8 ( (uint8_t) dst);
-	if ( ( (dst ^ v1) & (dst ^ v2) & 0x80) == 0x80) {
+	flag_szp8 ((uint8_t) dst);
+	if (((dst ^ v1) & (dst ^ v2) & 0x80) == 0x80) {
 		of = 1;
 	}
 	else {
@@ -219,11 +161,11 @@ void flag_adc8 (uint8_t v1, uint8_t v2, uint8_t v3) {
 		cf = 0; /* set or clear carry flag */
 	}
 
-	if ( ( (v1 ^ v2 ^ dst) & 0x10) == 0x10) {
+	if (((v1 ^ v2 ^ dst) & 0x10) == 0x10) {
 		af = 1;
 	}
 	else {
-		af = 0; /* set or clear auxilliary flag */
+		af = 0; /* set or clear auxiliary flag */
 	}
 }
 
@@ -232,8 +174,8 @@ void flag_adc16 (uint16_t v1, uint16_t v2, uint16_t v3) {
 	uint32_t	dst;
 
 	dst = (uint32_t) v1 + (uint32_t) v2 + (uint32_t) v3;
-	flag_szp16 ( (uint16_t) dst);
-	if ( ( ( (dst ^ v1) & (dst ^ v2) ) & 0x8000) == 0x8000) {
+	flag_szp16 ((uint16_t) dst);
+	if ((((dst ^ v1) & (dst ^ v2)) & 0x8000) == 0x8000) {
 		of = 1;
 	}
 	else {
@@ -247,7 +189,7 @@ void flag_adc16 (uint16_t v1, uint16_t v2, uint16_t v3) {
 		cf = 0;
 	}
 
-	if ( ( (v1 ^ v2 ^ dst) & 0x10) == 0x10) {
+	if (((v1 ^ v2 ^ dst) & 0x10) == 0x10) {
 		af = 1;
 	}
 	else {
@@ -260,7 +202,7 @@ void flag_add8 (uint8_t v1, uint8_t v2) {
 	uint16_t	dst;
 
 	dst = (uint16_t) v1 + (uint16_t) v2;
-	flag_szp8 ( (uint8_t) dst);
+	flag_szp8 ((uint8_t) dst);
 	if (dst & 0xFF00) {
 		cf = 1;
 	}
@@ -268,14 +210,14 @@ void flag_add8 (uint8_t v1, uint8_t v2) {
 		cf = 0;
 	}
 
-	if ( ( (dst ^ v1) & (dst ^ v2) & 0x80) == 0x80) {
+	if (((dst ^ v1) & (dst ^ v2) & 0x80) == 0x80) {
 		of = 1;
 	}
 	else {
 		of = 0;
 	}
 
-	if ( ( (v1 ^ v2 ^ dst) & 0x10) == 0x10) {
+	if (((v1 ^ v2 ^ dst) & 0x10) == 0x10) {
 		af = 1;
 	}
 	else {
@@ -288,7 +230,7 @@ void flag_add16 (uint16_t v1, uint16_t v2) {
 	uint32_t	dst;
 
 	dst = (uint32_t) v1 + (uint32_t) v2;
-	flag_szp16 ( (uint16_t) dst);
+	flag_szp16 ((uint16_t) dst);
 	if (dst & 0xFFFF0000) {
 		cf = 1;
 	}
@@ -296,14 +238,14 @@ void flag_add16 (uint16_t v1, uint16_t v2) {
 		cf = 0;
 	}
 
-	if ( ( (dst ^ v1) & (dst ^ v2) & 0x8000) == 0x8000) {
+	if (((dst ^ v1) & (dst ^ v2) & 0x8000) == 0x8000) {
 		of = 1;
 	}
 	else {
 		of = 0;
 	}
 
-	if ( ( (v1 ^ v2 ^ dst) & 0x10) == 0x10) {
+	if (((v1 ^ v2 ^ dst) & 0x10) == 0x10) {
 		af = 1;
 	}
 	else {
@@ -318,7 +260,7 @@ void flag_sbb8 (uint8_t v1, uint8_t v2, uint8_t v3) {
 
 	v2 += v3;
 	dst = (uint16_t) v1 - (uint16_t) v2;
-	flag_szp8 ( (uint8_t) dst);
+	flag_szp8 ((uint8_t) dst);
 	if (dst & 0xFF00) {
 		cf = 1;
 	}
@@ -326,14 +268,14 @@ void flag_sbb8 (uint8_t v1, uint8_t v2, uint8_t v3) {
 		cf = 0;
 	}
 
-	if ( (dst ^ v1) & (v1 ^ v2) & 0x80) {
+	if ((dst ^ v1) & (v1 ^ v2) & 0x80) {
 		of = 1;
 	}
 	else {
 		of = 0;
 	}
 
-	if ( (v1 ^ v2 ^ dst) & 0x10) {
+	if ((v1 ^ v2 ^ dst) & 0x10) {
 		af = 1;
 	}
 	else {
@@ -348,7 +290,7 @@ void flag_sbb16 (uint16_t v1, uint16_t v2, uint16_t v3) {
 
 	v2 += v3;
 	dst = (uint32_t) v1 - (uint32_t) v2;
-	flag_szp16 ( (uint16_t) dst);
+	flag_szp16 ((uint16_t) dst);
 	if (dst & 0xFFFF0000) {
 		cf = 1;
 	}
@@ -356,14 +298,14 @@ void flag_sbb16 (uint16_t v1, uint16_t v2, uint16_t v3) {
 		cf = 0;
 	}
 
-	if ( (dst ^ v1) & (v1 ^ v2) & 0x8000) {
+	if ((dst ^ v1) & (v1 ^ v2) & 0x8000) {
 		of = 1;
 	}
 	else {
 		of = 0;
 	}
 
-	if ( (v1 ^ v2 ^ dst) & 0x10) {
+	if ((v1 ^ v2 ^ dst) & 0x10) {
 		af = 1;
 	}
 	else {
@@ -377,7 +319,7 @@ void flag_sub8 (uint8_t v1, uint8_t v2) {
 	uint16_t	dst;
 
 	dst = (uint16_t) v1 - (uint16_t) v2;
-	flag_szp8 ( (uint8_t) dst);
+	flag_szp8 ((uint8_t) dst);
 	if (dst & 0xFF00) {
 		cf = 1;
 	}
@@ -385,14 +327,14 @@ void flag_sub8 (uint8_t v1, uint8_t v2) {
 		cf = 0;
 	}
 
-	if ( (dst ^ v1) & (v1 ^ v2) & 0x80) {
+	if ((dst ^ v1) & (v1 ^ v2) & 0x80) {
 		of = 1;
 	}
 	else {
 		of = 0;
 	}
 
-	if ( (v1 ^ v2 ^ dst) & 0x10) {
+	if ((v1 ^ v2 ^ dst) & 0x10) {
 		af = 1;
 	}
 	else {
@@ -406,7 +348,7 @@ void flag_sub16 (uint16_t v1, uint16_t v2) {
 	uint32_t	dst;
 
 	dst = (uint32_t) v1 - (uint32_t) v2;
-	flag_szp16 ( (uint16_t) dst);
+	flag_szp16 ((uint16_t) dst);
 	if (dst & 0xFFFF0000) {
 		cf = 1;
 	}
@@ -414,14 +356,14 @@ void flag_sub16 (uint16_t v1, uint16_t v2) {
 		cf = 0;
 	}
 
-	if ( (dst ^ v1) & (v1 ^ v2) & 0x8000) {
+	if ((dst ^ v1) & (v1 ^ v2) & 0x8000) {
 		of = 1;
 	}
 	else {
 		of = 0;
 	}
 
-	if ( (v1 ^ v2 ^ dst) & 0x10) {
+	if ((v1 ^ v2 ^ dst) & 0x10) {
 		af = 1;
 	}
 	else {
@@ -616,7 +558,7 @@ uint16_t pop() {
 
 	uint16_t	tempval;
 
-	tempval = getmem16 (segregs[regss], getreg16 (regsp) );
+	tempval = getmem16 (segregs[regss], getreg16 (regsp));
 	putreg16 (regsp, getreg16 (regsp) + 2);
 	return tempval;
 }
@@ -630,7 +572,7 @@ void reset86() {
 uint16_t readrm16 (uint8_t rmval) {
 	if (mode < 3) {
 		getea (rmval);
-		return read86 (ea) | ( (uint16_t) read86 (ea + 1) << 8);
+		return read86 (ea) | ((uint16_t) read86 (ea + 1) << 8);
 	}
 	else {
 		return getreg16 (rmval);
@@ -695,7 +637,7 @@ uint8_t op_grp2_8 (uint8_t cnt) {
 		}
 
 		if (cnt == 1) {
-			of = cf ^ ( (s >> 7) & 1);
+			of = cf ^ ((s >> 7) & 1);
 		}
 		break;
 
@@ -706,7 +648,7 @@ uint8_t op_grp2_8 (uint8_t cnt) {
 		}
 
 		if (cnt == 1) {
-			of = (s >> 7) ^ ( (s >> 6) & 1);
+			of = (s >> 7) ^ ((s >> 6) & 1);
 		}
 		break;
 
@@ -725,7 +667,7 @@ uint8_t op_grp2_8 (uint8_t cnt) {
 		}
 
 		if (cnt == 1) {
-			of = cf ^ ( (s >> 7) & 1);
+			of = cf ^ ((s >> 7) & 1);
 		}
 		break;
 
@@ -737,7 +679,7 @@ uint8_t op_grp2_8 (uint8_t cnt) {
 		}
 
 		if (cnt == 1) {
-			of = (s >> 7) ^ ( (s >> 6) & 1);
+			of = (s >> 7) ^ ((s >> 6) & 1);
 		}
 		break;
 
@@ -754,18 +696,18 @@ uint8_t op_grp2_8 (uint8_t cnt) {
 			s = (s << 1) & 0xFF;
 		}
 
-		if ( (cnt == 1) && (cf == (s >> 7) ) ) {
+		if ((cnt == 1) && (cf == (s >> 7))) {
 			of = 0;
 		}
 		else {
 			of = 1;
 		}
 
-		flag_szp8 ( (uint8_t) s);
+		flag_szp8 ((uint8_t) s);
 		break;
 
 	case 5: /* SHR r/m8 */
-		if ( (cnt == 1) && (s & 0x80) ) {
+		if ((cnt == 1) && (s & 0x80)) {
 			of = 1;
 		}
 		else {
@@ -777,7 +719,7 @@ uint8_t op_grp2_8 (uint8_t cnt) {
 			s = s >> 1;
 		}
 
-		flag_szp8 ( (uint8_t) s);
+		flag_szp8 ((uint8_t) s);
 		break;
 
 	case 7: /* SAR r/m8 */
@@ -788,7 +730,7 @@ uint8_t op_grp2_8 (uint8_t cnt) {
 		}
 
 		of = 0;
-		flag_szp8 ( (uint8_t) s);
+		flag_szp8 ((uint8_t) s);
 		break;
 	}
 
@@ -822,7 +764,7 @@ uint16_t op_grp2_16 (uint8_t cnt) {
 		}
 
 		if (cnt == 1) {
-			of = cf ^ ( (s >> 15) & 1);
+			of = cf ^ ((s >> 15) & 1);
 		}
 		break;
 
@@ -833,7 +775,7 @@ uint16_t op_grp2_16 (uint8_t cnt) {
 		}
 
 		if (cnt == 1) {
-			of = (s >> 15) ^ ( (s >> 14) & 1);
+			of = (s >> 15) ^ ((s >> 14) & 1);
 		}
 		break;
 
@@ -852,7 +794,7 @@ uint16_t op_grp2_16 (uint8_t cnt) {
 		}
 
 		if (cnt == 1) {
-			of = cf ^ ( (s >> 15) & 1);
+			of = cf ^ ((s >> 15) & 1);
 		}
 		break;
 
@@ -864,7 +806,7 @@ uint16_t op_grp2_16 (uint8_t cnt) {
 		}
 
 		if (cnt == 1) {
-			of = (s >> 15) ^ ( (s >> 14) & 1);
+			of = (s >> 15) ^ ((s >> 14) & 1);
 		}
 		break;
 
@@ -881,18 +823,18 @@ uint16_t op_grp2_16 (uint8_t cnt) {
 			s = (s << 1) & 0xFFFF;
 		}
 
-		if ( (cnt == 1) && (cf == (s >> 15) ) ) {
+		if ((cnt == 1) && (cf == (s >> 15))) {
 			of = 0;
 		}
 		else {
 			of = 1;
 		}
 
-		flag_szp16 ( (uint16_t) s);
+		flag_szp16 ((uint16_t) s);
 		break;
 
 	case 5: /* SHR r/m8 */
-		if ( (cnt == 1) && (s & 0x8000) ) {
+		if ((cnt == 1) && (s & 0x8000)) {
 			of = 1;
 		}
 		else {
@@ -904,7 +846,7 @@ uint16_t op_grp2_16 (uint8_t cnt) {
 			s = s >> 1;
 		}
 
-		flag_szp16 ( (uint16_t) s);
+		flag_szp16 ((uint16_t) s);
 		break;
 
 	case 7: /* SAR r/m8 */
@@ -915,7 +857,7 @@ uint16_t op_grp2_16 (uint8_t cnt) {
 		}
 
 		of = 0;
-		flag_szp16 ( (uint16_t) s);
+		flag_szp16 ((uint16_t) s);
 		break;
 	}
 
@@ -928,7 +870,7 @@ void op_div8 (uint16_t valdiv, uint8_t divisor) {
 		return;
 	}
 
-	if ( (valdiv / (uint16_t) divisor) > 0xFF) {
+	if ((valdiv / (uint16_t) divisor) > 0xFF) {
 		intcall86 (0);
 		return;
 	}
@@ -952,9 +894,9 @@ void op_idiv8 (uint16_t valdiv, uint8_t divisor) {
 
 	s1 = valdiv;
 	s2 = divisor;
-	sign = ( ( (s1 ^ s2) & 0x8000) != 0);
-	s1 = (s1 < 0x8000) ? s1 : ( (~s1 + 1) & 0xffff);
-	s2 = (s2 < 0x8000) ? s2 : ( (~s2 + 1) & 0xffff);
+	sign = (((s1 ^ s2) & 0x8000) != 0);
+	s1 = (s1 < 0x8000) ? s1 : ((~s1 + 1) & 0xffff);
+	s2 = (s2 < 0x8000) ? s2 : ((~s2 + 1) & 0xffff);
 	d1 = s1 / s2;
 	d2 = s1 % s2;
 	if (d1 & 0xFF00) {
@@ -977,7 +919,7 @@ void op_grp3_8() {
 	switch (reg) {
 	case 0:
 	case 1: /* TEST */
-		flag_log8 (oper1b & getmem8 (segregs[regcs], ip) );
+		flag_log8 (oper1b & getmem8 (segregs[regcs], ip));
 		StepIP (1);
 		break;
 
@@ -999,7 +941,7 @@ void op_grp3_8() {
 	case 4: /* MUL */
 		temp1 = (uint32_t) oper1b * (uint32_t) regs.byteregs[regal];
 		putreg16 (regax, temp1 & 0xFFFF);
-		flag_szp8 ( (uint8_t) temp1);
+		flag_szp8 ((uint8_t) temp1);
 		if (regs.byteregs[regah]) {
 			cf = 1;
 			of = 1;
@@ -1017,11 +959,11 @@ void op_grp3_8() {
 		oper1 = signext (oper1b);
 		temp1 = signext (regs.byteregs[regal]);
 		temp2 = oper1;
-		if ( (temp1 & 0x80) == 0x80) {
+		if ((temp1 & 0x80) == 0x80) {
 			temp1 = temp1 | 0xFFFFFF00;
 		}
 
-		if ( (temp2 & 0x80) == 0x80) {
+		if ((temp2 & 0x80) == 0x80) {
 			temp2 = temp2 | 0xFFFFFF00;
 		}
 
@@ -1056,7 +998,7 @@ void op_div16 (uint32_t valdiv, uint16_t divisor) {
 		return;
 	}
 
-	if ( (valdiv / (uint32_t) divisor) > 0xFFFF) {
+	if ((valdiv / (uint32_t) divisor) > 0xFFFF) {
 		intcall86 (0);
 		return;
 	}
@@ -1081,9 +1023,9 @@ void op_idiv16 (uint32_t valdiv, uint16_t divisor) {
 	s1 = valdiv;
 	s2 = divisor;
 	s2 = (s2 & 0x8000) ? (s2 | 0xffff0000) : s2;
-	sign = ( ( (s1 ^ s2) & 0x80000000) != 0);
-	s1 = (s1 < 0x80000000) ? s1 : ( (~s1 + 1) & 0xffffffff);
-	s2 = (s2 < 0x80000000) ? s2 : ( (~s2 + 1) & 0xffffffff);
+	sign = (((s1 ^ s2) & 0x80000000) != 0);
+	s1 = (s1 < 0x80000000) ? s1 : ((~s1 + 1) & 0xffffffff);
+	s2 = (s2 < 0x80000000) ? s2 : ((~s2 + 1) & 0xffffffff);
 	d1 = s1 / s2;
 	d2 = s1 % s2;
 	if (d1 & 0xFFFF0000) {
@@ -1104,7 +1046,7 @@ void op_grp3_16() {
 	switch (reg) {
 	case 0:
 	case 1: /* TEST */
-		flag_log16 (oper1 & getmem16 (segregs[regcs], ip) );
+		flag_log16 (oper1 & getmem16 (segregs[regcs], ip));
 		StepIP (2);
 		break;
 
@@ -1127,8 +1069,8 @@ void op_grp3_16() {
 		temp1 = (uint32_t) oper1 * (uint32_t) getreg16 (regax);
 		putreg16 (regax, temp1 & 0xFFFF);
 		putreg16 (regdx, temp1 >> 16);
-		flag_szp16 ( (uint16_t) temp1);
-		if (getreg16 (regdx) ) {
+		flag_szp16 ((uint16_t) temp1);
+		if (getreg16 (regdx)) {
 			cf = 1;
 			of = 1;
 		}
@@ -1155,7 +1097,7 @@ void op_grp3_16() {
 		temp3 = temp1 * temp2;
 		putreg16 (regax, temp3 & 0xFFFF);	/* into register ax */
 		putreg16 (regdx, temp3 >> 16);	/* into register dx */
-		if (getreg16 (regdx) ) {
+		if (getreg16 (regdx)) {
 			cf = 1;
 			of = 1;
 		}
@@ -1169,11 +1111,11 @@ void op_grp3_16() {
 		break;
 
 	case 6: /* DIV */
-		op_div16 ( ( (uint32_t) getreg16 (regdx) << 16) + getreg16 (regax), oper1);
+		op_div16 (((uint32_t) getreg16 (regdx) << 16) + getreg16 (regax), oper1);
 		break;
 
 	case 7: /* DIV */
-		op_idiv16 ( ( (uint32_t) getreg16 (regdx) << 16) + getreg16 (regax), oper1);
+		op_idiv16 (((uint32_t) getreg16 (regdx) << 16) + getreg16 (regax), oper1);
 		break;
 	}
 }
@@ -1245,14 +1187,14 @@ void intcall86 (uint8_t intnum) {
 	switch (intnum) {
 	case 0x10:
 		updatedscreen = 1;
-		if ( (regs.byteregs[regah]==0x00) || (regs.byteregs[regah]==0x10) ) {
+		if ((regs.byteregs[regah]==0x00) || (regs.byteregs[regah]==0x10)) {
 			oldregax = regs.wordregs[regax];
 			vidinterrupt();
 			regs.wordregs[regax] = oldregax;
 			if (regs.byteregs[regah]==0x10) return;
 			if (vidmode==9) return;
 		}
-		if ( (regs.byteregs[regah]==0x1A) && (lastint10ax!=0x0100) ) { //the 0x0100 is a cheap hack to make it not do this if DOS EDIT/QBASIC
+		if ((regs.byteregs[regah]==0x1A) && (lastint10ax!=0x0100)) { //the 0x0100 is a cheap hack to make it not do this if DOS EDIT/QBASIC
 			regs.byteregs[regal] = 0x1A;
 			regs.byteregs[regbl] = 0x8;
 			return;
@@ -1288,7 +1230,7 @@ void intcall86 (uint8_t intnum) {
 #endif
 	}
 
-	push (makeflagsword() );
+	push (makeflagsword());
 	push (segregs[regcs]);
 	push (ip);
 	segregs[regcs] = getmem16 (0, (uint16_t) intnum * 4 + 2);
@@ -1312,18 +1254,18 @@ uint64_t	lastcountertimer = 0, counterticks = 10000;
 extern uint8_t	nextintr();
 extern void	timing();
 
-void exec86 (uint32_t execloops) {
+void exec86(uint32_t execloops) {
 
 	uint32_t	loopcount;
 	uint8_t	docontinue;
 	static uint16_t firstip;
 	static uint16_t trap_toggle = 0;
 
-	counterticks = (uint64_t) ( (double) timerfreq / (double) 65536.0);
+	counterticks = (uint64_t) ((double) timerfreq / (double) 65536.0);
 
 	for (loopcount = 0; loopcount < execloops; loopcount++) {
 
-		if ( (totalexec & 31) == 0) timing();
+		if ((totalexec & 31) == 0) timing();
 
 		if (trap_toggle) {
 			intcall86 (1);
@@ -1336,8 +1278,8 @@ void exec86 (uint32_t execloops) {
 			trap_toggle = 0;
 		}
 
-		if (!trap_toggle && (ifl && (i8259.irr & (~i8259.imr) ) ) ) {
-			intcall86 (nextintr() );	/* get next interrupt from the i8259, if any */
+		if (!trap_toggle && (ifl && (i8259.irr & (~i8259.imr)))) {
+			intcall86 (nextintr());	/* get next interrupt from the i8259, if any */
 		}
 
 		reptype = 0;
@@ -1346,9 +1288,10 @@ void exec86 (uint32_t execloops) {
 		docontinue = 0;
 		firstip = ip;
 
-		if ( (segregs[regcs] == 0xF000) && (ip == 0xE066) ) didbootstrap = 0; //detect if we hit the BIOS entry point to clear didbootstrap because we've rebooted
+		if ((segregs[regcs] == 0xF000) && (ip == 0xE066)) didbootstrap = 0; //detect if we hit the BIOS entry point to clear didbootstrap because we've rebooted
 
-		while (!docontinue) {
+		while (!docontinue) 
+		{
 			segregs[regcs] = segregs[regcs] & 0xFFFF;
 			ip = ip & 0xFFFF;
 			savecs = segregs[regcs];
@@ -1441,7 +1384,7 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x5:	/* 05 ADD eAX Iv */
-			oper1 = (getreg16 (regax) );
+			oper1 = (getreg16 (regax));
 			oper2 = getmem16 (segregs[regcs], ip);
 			StepIP (2);
 			op_add16();
@@ -1485,7 +1428,7 @@ void exec86 (uint32_t execloops) {
 			oper1 = getreg16 (reg);
 			oper2 = readrm16 (rm);
 			op_or16();
-			if ( (oper1 == 0xF802) && (oper2 == 0xF802) ) {
+			if ((oper1 == 0xF802) && (oper2 == 0xF802)) {
 				sf = 0;	/* cheap hack to make Wolf 3D think we're a 286 so it plays */
 			}
 
@@ -1679,7 +1622,7 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x27:	/* 27 DAA */
-			if ( ( (regs.byteregs[regal] & 0xF) > 9) || (af == 1) ) {
+			if (((regs.byteregs[regal] & 0xF) > 9) || (af == 1)) {
 				oper1 = regs.byteregs[regal] + 6;
 				regs.byteregs[regal] = oper1 & 255;
 				if (oper1 & 0xFF00) {
@@ -1695,7 +1638,7 @@ void exec86 (uint32_t execloops) {
 				af = 0;
 			}
 
-			if ( ( (regs.byteregs[regal] & 0xF0) > 0x90) || (cf == 1) ) {
+			if (((regs.byteregs[regal] & 0xF0) > 0x90) || (cf == 1)) {
 				regs.byteregs[regal] = regs.byteregs[regal] + 0x60;
 				cf = 1;
 			}
@@ -1756,7 +1699,7 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x2F:	/* 2F DAS */
-			if ( ( (regs.byteregs[regal] & 15) > 9) || (af == 1) ) {
+			if (((regs.byteregs[regal] & 15) > 9) || (af == 1)) {
 				oper1 = regs.byteregs[regal] - 6;
 				regs.byteregs[regal] = oper1 & 255;
 				if (oper1 & 0xFF00) {
@@ -1772,7 +1715,7 @@ void exec86 (uint32_t execloops) {
 				af = 0;
 			}
 
-			if ( ( (regs.byteregs[regal] & 0xF0) > 0x90) || (cf == 1) ) {
+			if (((regs.byteregs[regal] & 0xF0) > 0x90) || (cf == 1)) {
 				regs.byteregs[regal] = regs.byteregs[regal] - 0x60;
 				cf = 1;
 			}
@@ -1832,7 +1775,7 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x37:	/* 37 AAA ASCII */
-			if ( ( (regs.byteregs[regal] & 0xF) > 9) || (af == 1) ) {
+			if (((regs.byteregs[regal] & 0xF) > 9) || (af == 1)) {
 				regs.byteregs[regal] = regs.byteregs[regal] + 6;
 				regs.byteregs[regah] = regs.byteregs[regah] + 1;
 				af = 1;
@@ -1889,7 +1832,7 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x3F:	/* 3F AAS ASCII */
-			if ( ( (regs.byteregs[regal] & 0xF) > 9) || (af == 1) ) {
+			if (((regs.byteregs[regal] & 0xF) > 9) || (af == 1)) {
 				regs.byteregs[regal] = regs.byteregs[regal] - 6;
 				regs.byteregs[regah] = regs.byteregs[regah] - 1;
 				af = 1;
@@ -2048,19 +1991,19 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x50:	/* 50 PUSH eAX */
-			push (getreg16 (regax) );
+			push (getreg16 (regax));
 			break;
 
 		case 0x51:	/* 51 PUSH eCX */
-			push (getreg16 (regcx) );
+			push (getreg16 (regcx));
 			break;
 
 		case 0x52:	/* 52 PUSH eDX */
-			push (getreg16 (regdx) );
+			push (getreg16 (regdx));
 			break;
 
 		case 0x53:	/* 53 PUSH eBX */
-			push (getreg16 (regbx) );
+			push (getreg16 (regbx));
 			break;
 
 		case 0x54:	/* 54 PUSH eSP */
@@ -2068,89 +2011,89 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x55:	/* 55 PUSH eBP */
-			push (getreg16 (regbp) );
+			push (getreg16 (regbp));
 			break;
 
 		case 0x56:	/* 56 PUSH eSI */
-			push (getreg16 (regsi) );
+			push (getreg16 (regsi));
 			break;
 
 		case 0x57:	/* 57 PUSH eDI */
-			push (getreg16 (regdi) );
+			push (getreg16 (regdi));
 			break;
 
 		case 0x58:	/* 58 POP eAX */
-			putreg16 (regax, pop() );
+			putreg16 (regax, pop());
 			break;
 
 		case 0x59:	/* 59 POP eCX */
-			putreg16 (regcx, pop() );
+			putreg16 (regcx, pop());
 			break;
 
 		case 0x5A:	/* 5A POP eDX */
-			putreg16 (regdx, pop() );
+			putreg16 (regdx, pop());
 			break;
 
 		case 0x5B:	/* 5B POP eBX */
-			putreg16 (regbx, pop() );
+			putreg16 (regbx, pop());
 			break;
 
 		case 0x5C:	/* 5C POP eSP */
-			putreg16 (regsp, pop() );
+			putreg16 (regsp, pop());
 			break;
 
 		case 0x5D:	/* 5D POP eBP */
-			putreg16 (regbp, pop() );
+			putreg16 (regbp, pop());
 			break;
 
 		case 0x5E:	/* 5E POP eSI */
-			putreg16 (regsi, pop() );
+			putreg16 (regsi, pop());
 			break;
 
 		case 0x5F:	/* 5F POP eDI */
-			putreg16 (regdi, pop() );
+			putreg16 (regdi, pop());
 			break;
 
 #ifdef CPU_V20
 		case 0x60:	/* 60 PUSHA (80186+) */
 			oldsp = getreg16 (regsp);
-			push (getreg16 (regax) );
-			push (getreg16 (regcx) );
-			push (getreg16 (regdx) );
-			push (getreg16 (regbx) );
+			push (getreg16 (regax));
+			push (getreg16 (regcx));
+			push (getreg16 (regdx));
+			push (getreg16 (regbx));
 			push (oldsp);
-			push (getreg16 (regbp) );
-			push (getreg16 (regsi) );
-			push (getreg16 (regdi) );
+			push (getreg16 (regbp));
+			push (getreg16 (regsi));
+			push (getreg16 (regdi));
 			break;
 
 		case 0x61:	/* 61 POPA (80186+) */
-			putreg16 (regdi, pop() );
-			putreg16 (regsi, pop() );
-			putreg16 (regbp, pop() );
+			putreg16 (regdi, pop());
+			putreg16 (regsi, pop());
+			putreg16 (regbp, pop());
 			dummy = pop();
-			putreg16 (regbx, pop() );
-			putreg16 (regdx, pop() );
-			putreg16 (regcx, pop() );
-			putreg16 (regax, pop() );
+			putreg16 (regbx, pop());
+			putreg16 (regdx, pop());
+			putreg16 (regcx, pop());
+			putreg16 (regax, pop());
 			break;
 
 		case 0x62: /* 62 BOUND Gv, Ev (80186+) */
 			modregrm();
 			getea (rm);
-			if (signext32 (getreg16 (reg) ) < signext32 ( getmem16 (ea >> 4, ea & 15) ) ) {
+			if (signext32 (getreg16 (reg)) < signext32 (getmem16 (ea >> 4, ea & 15))) {
 				intcall86 (5); //bounds check exception
 			}
 			else {
 				ea += 2;
-				if (signext32 (getreg16 (reg) ) > signext32 ( getmem16 (ea >> 4, ea & 15) ) ) {
+				if (signext32 (getreg16 (reg)) > signext32 (getmem16 (ea >> 4, ea & 15))) {
 					intcall86(5); //bounds check exception
 				}
 			}
 			break;
 
 		case 0x68:	/* 68 PUSH Iv (80186+) */
-			push (getmem16 (segregs[regcs], ip) );
+			push (getmem16 (segregs[regcs], ip));
 			StepIP (2);
 			break;
 
@@ -2159,11 +2102,11 @@ void exec86 (uint32_t execloops) {
 			temp1 = readrm16 (rm);
 			temp2 = getmem16 (segregs[regcs], ip);
 			StepIP (2);
-			if ( (temp1 & 0x8000L) == 0x8000L) {
+			if ((temp1 & 0x8000L) == 0x8000L) {
 				temp1 = temp1 | 0xFFFF0000L;
 			}
 
-			if ( (temp2 & 0x8000L) == 0x8000L) {
+			if ((temp2 & 0x8000L) == 0x8000L) {
 				temp2 = temp2 | 0xFFFF0000L;
 			}
 
@@ -2180,20 +2123,20 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x6A:	/* 6A PUSH Ib (80186+) */
-			push (getmem8 (segregs[regcs], ip) );
+			push (getmem8 (segregs[regcs], ip));
 			StepIP (1);
 			break;
 
 		case 0x6B:	/* 6B IMUL Gv Eb Ib (80186+) */
 			modregrm();
 			temp1 = readrm16 (rm);
-			temp2 = signext (getmem8 (segregs[regcs], ip) );
+			temp2 = signext (getmem8 (segregs[regcs], ip));
 			StepIP (1);
-			if ( (temp1 & 0x8000L) == 0x8000L) {
+			if ((temp1 & 0x8000L) == 0x8000L) {
 				temp1 = temp1 | 0xFFFF0000L;
 			}
 
-			if ( (temp2 & 0x8000L) == 0x8000L) {
+			if ((temp2 & 0x8000L) == 0x8000L) {
 				temp2 = temp2 | 0xFFFF0000L;
 			}
 
@@ -2210,11 +2153,11 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x6C:	/* 6E INSB */
-			if (reptype && (getreg16 (regcx) == 0) ) {
+			if (reptype && (getreg16 (regcx) == 0)) {
 				break;
 			}
 
-			putmem8 (useseg, getreg16 (regsi) , portin (regs.wordregs[regdx]) );
+			putmem8 (useseg, getreg16 (regsi) , portin (regs.wordregs[regdx]));
 			if (df) {
 				putreg16 (regsi, getreg16 (regsi) - 1);
 				putreg16 (regdi, getreg16 (regdi) - 1);
@@ -2238,11 +2181,11 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x6D:	/* 6F INSW */
-			if (reptype && (getreg16 (regcx) == 0) ) {
+			if (reptype && (getreg16 (regcx) == 0)) {
 				break;
 			}
 
-			putmem16 (useseg, getreg16 (regsi) , portin16 (regs.wordregs[regdx]) );
+			putmem16 (useseg, getreg16 (regsi) , portin16 (regs.wordregs[regdx]));
 			if (df) {
 				putreg16 (regsi, getreg16 (regsi) - 2);
 				putreg16 (regdi, getreg16 (regdi) - 2);
@@ -2266,11 +2209,11 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x6E:	/* 6E OUTSB */
-			if (reptype && (getreg16 (regcx) == 0) ) {
+			if (reptype && (getreg16 (regcx) == 0)) {
 				break;
 			}
 
-			portout (regs.wordregs[regdx], getmem8 (useseg, getreg16 (regsi) ) );
+			portout (regs.wordregs[regdx], getmem8 (useseg, getreg16 (regsi)));
 			if (df) {
 				putreg16 (regsi, getreg16 (regsi) - 1);
 				putreg16 (regdi, getreg16 (regdi) - 1);
@@ -2294,11 +2237,11 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x6F:	/* 6F OUTSW */
-			if (reptype && (getreg16 (regcx) == 0) ) {
+			if (reptype && (getreg16 (regcx) == 0)) {
 				break;
 			}
 
-			portout16 (regs.wordregs[regdx], getmem16 (useseg, getreg16 (regsi) ) );
+			portout16 (regs.wordregs[regdx], getmem16 (useseg, getreg16 (regsi)));
 			if (df) {
 				putreg16 (regsi, getreg16 (regsi) - 2);
 				putreg16 (regdi, getreg16 (regdi) - 2);
@@ -2323,7 +2266,7 @@ void exec86 (uint32_t execloops) {
 #endif
 
 		case 0x70:	/* 70 JO Jb */
-			temp16 = signext (getmem8 (segregs[regcs], ip) );
+			temp16 = signext (getmem8 (segregs[regcs], ip));
 			StepIP (1);
 			if (of) {
 				ip = ip + temp16;
@@ -2331,7 +2274,7 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x71:	/* 71 JNO Jb */
-			temp16 = signext (getmem8 (segregs[regcs], ip) );
+			temp16 = signext (getmem8 (segregs[regcs], ip));
 			StepIP (1);
 			if (!of) {
 				ip = ip + temp16;
@@ -2339,7 +2282,7 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x72:	/* 72 JB Jb */
-			temp16 = signext (getmem8 (segregs[regcs], ip) );
+			temp16 = signext (getmem8 (segregs[regcs], ip));
 			StepIP (1);
 			if (cf) {
 				ip = ip + temp16;
@@ -2347,7 +2290,7 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x73:	/* 73 JNB Jb */
-			temp16 = signext (getmem8 (segregs[regcs], ip) );
+			temp16 = signext (getmem8 (segregs[regcs], ip));
 			StepIP (1);
 			if (!cf) {
 				ip = ip + temp16;
@@ -2355,7 +2298,7 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x74:	/* 74 JZ Jb */
-			temp16 = signext (getmem8 (segregs[regcs], ip) );
+			temp16 = signext (getmem8 (segregs[regcs], ip));
 			StepIP (1);
 			if (zf) {
 				ip = ip + temp16;
@@ -2363,7 +2306,7 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x75:	/* 75 JNZ Jb */
-			temp16 = signext (getmem8 (segregs[regcs], ip) );
+			temp16 = signext (getmem8 (segregs[regcs], ip));
 			StepIP (1);
 			if (!zf) {
 				ip = ip + temp16;
@@ -2371,7 +2314,7 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x76:	/* 76 JBE Jb */
-			temp16 = signext (getmem8 (segregs[regcs], ip) );
+			temp16 = signext (getmem8 (segregs[regcs], ip));
 			StepIP (1);
 			if (cf || zf) {
 				ip = ip + temp16;
@@ -2379,7 +2322,7 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x77:	/* 77 JA Jb */
-			temp16 = signext (getmem8 (segregs[regcs], ip) );
+			temp16 = signext (getmem8 (segregs[regcs], ip));
 			StepIP (1);
 			if (!cf && !zf) {
 				ip = ip + temp16;
@@ -2387,7 +2330,7 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x78:	/* 78 JS Jb */
-			temp16 = signext (getmem8 (segregs[regcs], ip) );
+			temp16 = signext (getmem8 (segregs[regcs], ip));
 			StepIP (1);
 			if (sf) {
 				ip = ip + temp16;
@@ -2395,7 +2338,7 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x79:	/* 79 JNS Jb */
-			temp16 = signext (getmem8 (segregs[regcs], ip) );
+			temp16 = signext (getmem8 (segregs[regcs], ip));
 			StepIP (1);
 			if (!sf) {
 				ip = ip + temp16;
@@ -2403,7 +2346,7 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x7A:	/* 7A JPE Jb */
-			temp16 = signext (getmem8 (segregs[regcs], ip) );
+			temp16 = signext (getmem8 (segregs[regcs], ip));
 			StepIP (1);
 			if (pf) {
 				ip = ip + temp16;
@@ -2411,7 +2354,7 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x7B:	/* 7B JPO Jb */
-			temp16 = signext (getmem8 (segregs[regcs], ip) );
+			temp16 = signext (getmem8 (segregs[regcs], ip));
 			StepIP (1);
 			if (!pf) {
 				ip = ip + temp16;
@@ -2419,7 +2362,7 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x7C:	/* 7C JL Jb */
-			temp16 = signext (getmem8 (segregs[regcs], ip) );
+			temp16 = signext (getmem8 (segregs[regcs], ip));
 			StepIP (1);
 			if (sf != of) {
 				ip = ip + temp16;
@@ -2427,7 +2370,7 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x7D:	/* 7D JGE Jb */
-			temp16 = signext (getmem8 (segregs[regcs], ip) );
+			temp16 = signext (getmem8 (segregs[regcs], ip));
 			StepIP (1);
 			if (sf == of) {
 				ip = ip + temp16;
@@ -2435,17 +2378,17 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x7E:	/* 7E JLE Jb */
-			temp16 = signext (getmem8 (segregs[regcs], ip) );
+			temp16 = signext (getmem8 (segregs[regcs], ip));
 			StepIP (1);
-			if ( (sf != of) || zf) {
+			if ((sf != of) || zf) {
 				ip = ip + temp16;
 			}
 			break;
 
 		case 0x7F:	/* 7F JG Jb */
-			temp16 = signext (getmem8 (segregs[regcs], ip) );
+			temp16 = signext (getmem8 (segregs[regcs], ip));
 			StepIP (1);
-			if (!zf && (sf == of) ) {
+			if (!zf && (sf == of)) {
 				ip = ip + temp16;
 			}
 			break;
@@ -2499,7 +2442,7 @@ void exec86 (uint32_t execloops) {
 				StepIP (2);
 			}
 			else {
-				oper2 = signext (getmem8 (segregs[regcs], ip) );
+				oper2 = signext (getmem8 (segregs[regcs], ip));
 				StepIP (1);
 			}
 
@@ -2554,56 +2497,56 @@ void exec86 (uint32_t execloops) {
 		case 0x86:	/* 86 XCHG Gb Eb */
 			modregrm();
 			oper1b = getreg8 (reg);
-			putreg8 (reg, readrm8 (rm) );
+			putreg8 (reg, readrm8 (rm));
 			writerm8 (rm, oper1b);
 			break;
 
 		case 0x87:	/* 87 XCHG Gv Ev */
 			modregrm();
 			oper1 = getreg16 (reg);
-			putreg16 (reg, readrm16 (rm) );
+			putreg16 (reg, readrm16 (rm));
 			writerm16 (rm, oper1);
 			break;
 
 		case 0x88:	/* 88 MOV Eb Gb */
 			modregrm();
-			writerm8 (rm, getreg8 (reg) );
+			writerm8 (rm, getreg8 (reg));
 			break;
 
 		case 0x89:	/* 89 MOV Ev Gv */
 			modregrm();
-			writerm16 (rm, getreg16 (reg) );
+			writerm16 (rm, getreg16 (reg));
 			break;
 
 		case 0x8A:	/* 8A MOV Gb Eb */
 			modregrm();
-			putreg8 (reg, readrm8 (rm) );
+			putreg8 (reg, readrm8 (rm));
 			break;
 
 		case 0x8B:	/* 8B MOV Gv Ev */
 			modregrm();
-			putreg16 (reg, readrm16 (rm) );
+			putreg16 (reg, readrm16 (rm));
 			break;
 
 		case 0x8C:	/* 8C MOV Ew Sw */
 			modregrm();
-			writerm16 (rm, getsegreg (reg) );
+			writerm16 (rm, getsegreg (reg));
 			break;
 
 		case 0x8D:	/* 8D LEA Gv M */
 			modregrm();
 			getea (rm);
-			putreg16 (reg, ea - segbase (useseg) );
+			putreg16 (reg, ea - segbase (useseg));
 			break;
 
 		case 0x8E:	/* 8E MOV Sw Ew */
 			modregrm();
-			putsegreg (reg, readrm16 (rm) );
+			putsegreg (reg, readrm16 (rm));
 			break;
 
 		case 0x8F:	/* 8F POP Ev */
 			modregrm();
-			writerm16 (rm, pop() );
+			writerm16 (rm, pop());
 			break;
 
 		case 0x90:	/* 90 NOP */
@@ -2611,48 +2554,48 @@ void exec86 (uint32_t execloops) {
 
 		case 0x91:	/* 91 XCHG eCX eAX */
 			oper1 = getreg16 (regcx);
-			putreg16 (regcx, getreg16 (regax) );
+			putreg16 (regcx, getreg16 (regax));
 			putreg16 (regax, oper1);
 			break;
 
 		case 0x92:	/* 92 XCHG eDX eAX */
 			oper1 = getreg16 (regdx);
-			putreg16 (regdx, getreg16 (regax) );
+			putreg16 (regdx, getreg16 (regax));
 			putreg16 (regax, oper1);
 			break;
 
 		case 0x93:	/* 93 XCHG eBX eAX */
 			oper1 = getreg16 (regbx);
-			putreg16 (regbx, getreg16 (regax) );
+			putreg16 (regbx, getreg16 (regax));
 			putreg16 (regax, oper1);
 			break;
 
 		case 0x94:	/* 94 XCHG eSP eAX */
 			oper1 = getreg16 (regsp);
-			putreg16 (regsp, getreg16 (regax) );
+			putreg16 (regsp, getreg16 (regax));
 			putreg16 (regax, oper1);
 			break;
 
 		case 0x95:	/* 95 XCHG eBP eAX */
 			oper1 = getreg16 (regbp);
-			putreg16 (regbp, getreg16 (regax) );
+			putreg16 (regbp, getreg16 (regax));
 			putreg16 (regax, oper1);
 			break;
 
 		case 0x96:	/* 96 XCHG eSI eAX */
 			oper1 = getreg16 (regsi);
-			putreg16 (regsi, getreg16 (regax) );
+			putreg16 (regsi, getreg16 (regax));
 			putreg16 (regax, oper1);
 			break;
 
 		case 0x97:	/* 97 XCHG eDI eAX */
 			oper1 = getreg16 (regdi);
-			putreg16 (regdi, getreg16 (regax) );
+			putreg16 (regdi, getreg16 (regax));
 			putreg16 (regax, oper1);
 			break;
 
 		case 0x98:	/* 98 CBW */
-			if ( (regs.byteregs[regal] & 0x80) == 0x80) {
+			if ((regs.byteregs[regal] & 0x80) == 0x80) {
 				regs.byteregs[regah] = 0xFF;
 			}
 			else {
@@ -2661,7 +2604,7 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x99:	/* 99 CWD */
-			if ( (regs.byteregs[regah] & 0x80) == 0x80) {
+			if ((regs.byteregs[regah] & 0x80) == 0x80) {
 				putreg16 (regdx, 0xFFFF);
 			}
 			else {
@@ -2693,7 +2636,7 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0x9E:	/* 9E SAHF */
-			decodeflagsword ( (makeflagsword() & 0xFF00) | regs.byteregs[regah]);
+			decodeflagsword ((makeflagsword() & 0xFF00) | regs.byteregs[regah]);
 			break;
 
 		case 0x9F:	/* 9F LAHF */
@@ -2701,12 +2644,12 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0xA0:	/* A0 MOV regs.byteregs[regal] Ob */
-			regs.byteregs[regal] = getmem8 (useseg, getmem16 (segregs[regcs], ip) );
+			regs.byteregs[regal] = getmem8 (useseg, getmem16 (segregs[regcs], ip));
 			StepIP (2);
 			break;
 
 		case 0xA1:	/* A1 MOV eAX Ov */
-			oper1 = getmem16 (useseg, getmem16 (segregs[regcs], ip) );
+			oper1 = getmem16 (useseg, getmem16 (segregs[regcs], ip));
 			StepIP (2);
 			putreg16 (regax, oper1);
 			break;
@@ -2717,16 +2660,16 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0xA3:	/* A3 MOV Ov eAX */
-			putmem16 (useseg, getmem16 (segregs[regcs], ip), getreg16 (regax) );
+			putmem16 (useseg, getmem16 (segregs[regcs], ip), getreg16 (regax));
 			StepIP (2);
 			break;
 
 		case 0xA4:	/* A4 MOVSB */
-			if (reptype && (getreg16 (regcx) == 0) ) {
+			if (reptype && (getreg16 (regcx) == 0)) {
 				break;
 			}
 
-			putmem8 (segregs[reges], getreg16 (regdi), getmem8 (useseg, getreg16 (regsi) ) );
+			putmem8 (segregs[reges], getreg16 (regdi), getmem8 (useseg, getreg16 (regsi)));
 			if (df) {
 				putreg16 (regsi, getreg16 (regsi) - 1);
 				putreg16 (regdi, getreg16 (regdi) - 1);
@@ -2750,11 +2693,11 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0xA5:	/* A5 MOVSW */
-			if (reptype && (getreg16 (regcx) == 0) ) {
+			if (reptype && (getreg16 (regcx) == 0)) {
 				break;
 			}
 
-			putmem16 (segregs[reges], getreg16 (regdi), getmem16 (useseg, getreg16 (regsi) ) );
+			putmem16 (segregs[reges], getreg16 (regdi), getmem16 (useseg, getreg16 (regsi)));
 			if (df) {
 				putreg16 (regsi, getreg16 (regsi) - 2);
 				putreg16 (regdi, getreg16 (regdi) - 2);
@@ -2778,12 +2721,12 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0xA6:	/* A6 CMPSB */
-			if (reptype && (getreg16 (regcx) == 0) ) {
+			if (reptype && (getreg16 (regcx) == 0)) {
 				break;
 			}
 
-			oper1b = getmem8 (useseg, getreg16 (regsi) );
-			oper2b = getmem8 (segregs[reges], getreg16 (regdi) );
+			oper1b = getmem8 (useseg, getreg16 (regsi));
+			oper2b = getmem8 (segregs[reges], getreg16 (regdi));
 			if (df) {
 				putreg16 (regsi, getreg16 (regsi) - 1);
 				putreg16 (regdi, getreg16 (regdi) - 1);
@@ -2798,10 +2741,10 @@ void exec86 (uint32_t execloops) {
 				putreg16 (regcx, getreg16 (regcx) - 1);
 			}
 
-			if ( (reptype == 1) && !zf) {
+			if ((reptype == 1) && !zf) {
 				break;
 			}
-			else if ( (reptype == 2) && (zf == 1) ) {
+			else if ((reptype == 2) && (zf == 1)) {
 				break;
 			}
 
@@ -2815,12 +2758,12 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0xA7:	/* A7 CMPSW */
-			if (reptype && (getreg16 (regcx) == 0) ) {
+			if (reptype && (getreg16 (regcx) == 0)) {
 				break;
 			}
 
-			oper1 = getmem16 (useseg, getreg16 (regsi) );
-			oper2 = getmem16 (segregs[reges], getreg16 (regdi) );
+			oper1 = getmem16 (useseg, getreg16 (regsi));
+			oper2 = getmem16 (segregs[reges], getreg16 (regdi));
 			if (df) {
 				putreg16 (regsi, getreg16 (regsi) - 2);
 				putreg16 (regdi, getreg16 (regdi) - 2);
@@ -2835,11 +2778,11 @@ void exec86 (uint32_t execloops) {
 				putreg16 (regcx, getreg16 (regcx) - 1);
 			}
 
-			if ( (reptype == 1) && !zf) {
+			if ((reptype == 1) && !zf) {
 				break;
 			}
 
-			if ( (reptype == 2) && (zf == 1) ) {
+			if ((reptype == 2) && (zf == 1)) {
 				break;
 			}
 
@@ -2867,7 +2810,7 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0xAA:	/* AA STOSB */
-			if (reptype && (getreg16 (regcx) == 0) ) {
+			if (reptype && (getreg16 (regcx) == 0)) {
 				break;
 			}
 
@@ -2893,11 +2836,11 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0xAB:	/* AB STOSW */
-			if (reptype && (getreg16 (regcx) == 0) ) {
+			if (reptype && (getreg16 (regcx) == 0)) {
 				break;
 			}
 
-			putmem16 (segregs[reges], getreg16 (regdi), getreg16 (regax) );
+			putmem16 (segregs[reges], getreg16 (regdi), getreg16 (regax));
 			if (df) {
 				putreg16 (regdi, getreg16 (regdi) - 2);
 			}
@@ -2919,11 +2862,11 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0xAC:	/* AC LODSB */
-			if (reptype && (getreg16 (regcx) == 0) ) {
+			if (reptype && (getreg16 (regcx) == 0)) {
 				break;
 			}
 
-			regs.byteregs[regal] = getmem8 (useseg, getreg16 (regsi) );
+			regs.byteregs[regal] = getmem8 (useseg, getreg16 (regsi));
 			if (df) {
 				putreg16 (regsi, getreg16 (regsi) - 1);
 			}
@@ -2945,11 +2888,11 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0xAD:	/* AD LODSW */
-			if (reptype && (getreg16 (regcx) == 0) ) {
+			if (reptype && (getreg16 (regcx) == 0)) {
 				break;
 			}
 
-			oper1 = getmem16 (useseg, getreg16 (regsi) );
+			oper1 = getmem16 (useseg, getreg16 (regsi));
 			putreg16 (regax, oper1);
 			if (df) {
 				putreg16 (regsi, getreg16 (regsi) - 2);
@@ -2972,11 +2915,11 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0xAE:	/* AE SCASB */
-			if (reptype && (getreg16 (regcx) == 0) ) {
+			if (reptype && (getreg16 (regcx) == 0)) {
 				break;
 			}
 
-			oper1b = getmem8 (segregs[reges], getreg16 (regdi) );
+			oper1b = getmem8 (segregs[reges], getreg16 (regdi));
 			oper2b = regs.byteregs[regal];
 			flag_sub8 (oper1b, oper2b);
 			if (df) {
@@ -2990,10 +2933,10 @@ void exec86 (uint32_t execloops) {
 				putreg16 (regcx, getreg16 (regcx) - 1);
 			}
 
-			if ( (reptype == 1) && !zf) {
+			if ((reptype == 1) && !zf) {
 				break;
 			}
-			else if ( (reptype == 2) && (zf == 1) ) {
+			else if ((reptype == 2) && (zf == 1)) {
 				break;
 			}
 
@@ -3007,11 +2950,11 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0xAF:	/* AF SCASW */
-			if (reptype && (getreg16 (regcx) == 0) ) {
+			if (reptype && (getreg16 (regcx) == 0)) {
 				break;
 			}
 
-			oper1 = getmem16 (segregs[reges], getreg16 (regdi) );
+			oper1 = getmem16 (segregs[reges], getreg16 (regdi));
 			oper2 = getreg16 (regax);
 			flag_sub16 (oper1, oper2);
 			if (df) {
@@ -3025,10 +2968,10 @@ void exec86 (uint32_t execloops) {
 				putreg16 (regcx, getreg16 (regcx) - 1);
 			}
 
-			if ( (reptype == 1) && !zf) {
+			if ((reptype == 1) && !zf) {
 				break;
 			}
-			else if ( (reptype == 2) & (zf == 1) ) {
+			else if ((reptype == 2) & (zf == 1)) {
 				break;
 			}
 
@@ -3106,22 +3049,22 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0xBC:	/* BC MOV eSP Iv */
-			putreg16 (regsp, getmem16 (segregs[regcs], ip) );
+			putreg16 (regsp, getmem16 (segregs[regcs], ip));
 			StepIP (2);
 			break;
 
 		case 0xBD:	/* BD MOV eBP Iv */
-			putreg16 (regbp, getmem16 (segregs[regcs], ip) );
+			putreg16 (regbp, getmem16 (segregs[regcs], ip));
 			StepIP (2);
 			break;
 
 		case 0xBE:	/* BE MOV eSI Iv */
-			putreg16 (regsi, getmem16 (segregs[regcs], ip) );
+			putreg16 (regsi, getmem16 (segregs[regcs], ip));
 			StepIP (2);
 			break;
 
 		case 0xBF:	/* BF MOV eDI Iv */
-			putreg16 (regdi, getmem16 (segregs[regcs], ip) );
+			putreg16 (regdi, getmem16 (segregs[regcs], ip));
 			StepIP (2);
 			break;
 
@@ -3130,7 +3073,7 @@ void exec86 (uint32_t execloops) {
 			oper1b = readrm8 (rm);
 			oper2b = getmem8 (segregs[regcs], ip);
 			StepIP (1);
-			writerm8 (rm, op_grp2_8 (oper2b) );
+			writerm8 (rm, op_grp2_8 (oper2b));
 			break;
 
 		case 0xC1:	/* C1 GRP2 word imm8 (80186+) */
@@ -3138,7 +3081,7 @@ void exec86 (uint32_t execloops) {
 			oper1 = readrm16 (rm);
 			oper2 = getmem8 (segregs[regcs], ip);
 			StepIP (1);
-			writerm16 (rm, op_grp2_16 ( (uint8_t) oper2) );
+			writerm16 (rm, op_grp2_16 ((uint8_t) oper2));
 			break;
 
 		case 0xC2:	/* C2 RET Iw */
@@ -3167,13 +3110,13 @@ void exec86 (uint32_t execloops) {
 
 		case 0xC6:	/* C6 MOV Eb Ib */
 			modregrm();
-			writerm8 (rm, getmem8 (segregs[regcs], ip) );
+			writerm8 (rm, getmem8 (segregs[regcs], ip));
 			StepIP (1);
 			break;
 
 		case 0xC7:	/* C7 MOV Ev Iv */
 			modregrm();
-			writerm16 (rm, getmem16 (segregs[regcs], ip) );
+			writerm16 (rm, getmem16 (segregs[regcs], ip));
 			StepIP (2);
 			break;
 
@@ -3182,15 +3125,15 @@ void exec86 (uint32_t execloops) {
 			StepIP (2);
 			nestlev = getmem8 (segregs[regcs], ip);
 			StepIP (1);
-			push (getreg16 (regbp) );
+			push (getreg16 (regbp));
 			frametemp = getreg16 (regsp);
 			if (nestlev) {
 				for (temp16 = 1; temp16 < nestlev; temp16++) {
 					putreg16 (regbp, getreg16 (regbp) - 2);
-					push (getreg16 (regbp) );
+					push (getreg16 (regbp));
 				}
 
-				push (getreg16 (regsp) );
+				push (getreg16 (regsp));
 			}
 
 			putreg16 (regbp, frametemp);
@@ -3199,8 +3142,8 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0xC9:	/* C9 LEAVE (80186+) */
-			putreg16 (regsp, getreg16 (regbp) );
-			putreg16 (regbp, pop() );
+			putreg16 (regsp, getreg16 (regbp));
+			putreg16 (regbp, pop());
 
 			break;
 
@@ -3235,7 +3178,7 @@ void exec86 (uint32_t execloops) {
 		case 0xCF:	/* CF IRET */
 			ip = pop();
 			segregs[regcs] = pop();
-			decodeflagsword (pop() );
+			decodeflagsword (pop());
 
 			/*
 			* if (net.enabled) net.canrecv = 1;
@@ -3245,25 +3188,25 @@ void exec86 (uint32_t execloops) {
 		case 0xD0:	/* D0 GRP2 Eb 1 */
 			modregrm();
 			oper1b = readrm8 (rm);
-			writerm8 (rm, op_grp2_8 (1) );
+			writerm8 (rm, op_grp2_8 (1));
 			break;
 
 		case 0xD1:	/* D1 GRP2 Ev 1 */
 			modregrm();
 			oper1 = readrm16 (rm);
-			writerm16 (rm, op_grp2_16 (1) );
+			writerm16 (rm, op_grp2_16 (1));
 			break;
 
 		case 0xD2:	/* D2 GRP2 Eb regs.byteregs[regcl] */
 			modregrm();
 			oper1b = readrm8 (rm);
-			writerm8 (rm, op_grp2_8 (regs.byteregs[regcl]) );
+			writerm8 (rm, op_grp2_8 (regs.byteregs[regcl]));
 			break;
 
 		case 0xD3:	/* D3 GRP2 Ev regs.byteregs[regcl] */
 			modregrm();
 			oper1 = readrm16 (rm);
-			writerm16 (rm, op_grp2_16 (regs.byteregs[regcl]) );
+			writerm16 (rm, op_grp2_16 (regs.byteregs[regcl]));
 			break;
 
 		case 0xD4:	/* D4 AAM I0 */
@@ -3276,7 +3219,7 @@ void exec86 (uint32_t execloops) {
 
 			regs.byteregs[regah] = (regs.byteregs[regal] / oper1) & 255;
 			regs.byteregs[regal] = (regs.byteregs[regal] % oper1) & 255;
-			flag_szp16 (getreg16 (regax) );
+			flag_szp16 (getreg16 (regax));
 			break;
 
 		case 0xD5:	/* D5 AAD I0 */
@@ -3310,36 +3253,36 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0xE0:	/* E0 LOOPNZ Jb */
-			temp16 = signext (getmem8 (segregs[regcs], ip) );
+			temp16 = signext (getmem8 (segregs[regcs], ip));
 			StepIP (1);
 			putreg16 (regcx, getreg16 (regcx) - 1);
-			if ( (getreg16 (regcx) ) && !zf) {
+			if ((getreg16 (regcx)) && !zf) {
 				ip = ip + temp16;
 			}
 			break;
 
 		case 0xE1:	/* E1 LOOPZ Jb */
-			temp16 = signext (getmem8 (segregs[regcs], ip) );
+			temp16 = signext (getmem8 (segregs[regcs], ip));
 			StepIP (1);
-			putreg16 (regcx, (getreg16 (regcx) ) - 1);
-			if ( (getreg16 (regcx) ) && (zf == 1) ) {
+			putreg16 (regcx, (getreg16 (regcx)) - 1);
+			if ((getreg16 (regcx)) && (zf == 1)) {
 				ip = ip + temp16;
 			}
 			break;
 
 		case 0xE2:	/* E2 LOOP Jb */
-			temp16 = signext (getmem8 (segregs[regcs], ip) );
+			temp16 = signext (getmem8 (segregs[regcs], ip));
 			StepIP (1);
-			putreg16 (regcx, (getreg16 (regcx) ) - 1);
-			if (getreg16 (regcx) ) {
+			putreg16 (regcx, (getreg16 (regcx)) - 1);
+			if (getreg16 (regcx)) {
 				ip = ip + temp16;
 			}
 			break;
 
 		case 0xE3:	/* E3 JCXZ Jb */
-			temp16 = signext (getmem8 (segregs[regcs], ip) );
+			temp16 = signext (getmem8 (segregs[regcs], ip));
 			StepIP (1);
-			if (! (getreg16 (regcx) ) ) {
+			if (! (getreg16 (regcx))) {
 				ip = ip + temp16;
 			}
 			break;
@@ -3353,7 +3296,7 @@ void exec86 (uint32_t execloops) {
 		case 0xE5:	/* E5 IN eAX Ib */
 			oper1b = getmem8 (segregs[regcs], ip);
 			StepIP (1);
-			putreg16 (regax, portin16 (oper1b) );
+			putreg16 (regax, portin16 (oper1b));
 			break;
 
 		case 0xE6:	/* E6 OUT Ib regs.byteregs[regal] */
@@ -3365,7 +3308,7 @@ void exec86 (uint32_t execloops) {
 		case 0xE7:	/* E7 OUT Ib eAX */
 			oper1b = getmem8 (segregs[regcs], ip);
 			StepIP (1);
-			portout16 (oper1b, (getreg16 (regax) ) );
+			portout16 (oper1b, (getreg16 (regax)));
 			break;
 
 		case 0xE8:	/* E8 CALL Jv */
@@ -3390,29 +3333,29 @@ void exec86 (uint32_t execloops) {
 			break;
 
 		case 0xEB:	/* EB JMP Jb */
-			oper1 = signext (getmem8 (segregs[regcs], ip) );
+			oper1 = signext (getmem8 (segregs[regcs], ip));
 			StepIP (1);
 			ip = ip + oper1;
 			break;
 
 		case 0xEC:	/* EC IN regs.byteregs[regal] regdx */
-			oper1 = (getreg16 (regdx) );
+			oper1 = (getreg16 (regdx));
 			regs.byteregs[regal] = (uint8_t) portin (oper1);
 			break;
 
 		case 0xED:	/* ED IN eAX regdx */
-			oper1 = (getreg16 (regdx) );
-			putreg16 (regax, portin16 (oper1) );
+			oper1 = (getreg16 (regdx));
+			putreg16 (regax, portin16 (oper1));
 			break;
 
 		case 0xEE:	/* EE OUT regdx regs.byteregs[regal] */
-			oper1 = (getreg16 (regdx) );
+			oper1 = (getreg16 (regdx));
 			portout (oper1, regs.byteregs[regal]);
 			break;
 
 		case 0xEF:	/* EF OUT regdx eAX */
-			oper1 = (getreg16 (regdx) );
-			portout16 (oper1, (getreg16 (regax) ) );
+			oper1 = (getreg16 (regdx));
+			portout16 (oper1, (getreg16 (regax)));
 			break;
 
 		case 0xF0:	/* F0 LOCK */
@@ -3435,7 +3378,7 @@ void exec86 (uint32_t execloops) {
 			modregrm();
 			oper1b = readrm8 (rm);
 			op_grp3_8();
-			if ( (reg > 1) && (reg < 4) ) {
+			if ((reg > 1) && (reg < 4)) {
 				writerm8 (rm, res8);
 			}
 			break;
@@ -3444,7 +3387,7 @@ void exec86 (uint32_t execloops) {
 			modregrm();
 			oper1 = readrm16 (rm);
 			op_grp3_16();
-			if ( (reg > 1) && (reg < 4) ) {
+			if ((reg > 1) && (reg < 4)) {
 				writerm16 (rm, res16);
 			}
 			break;
@@ -3515,4 +3458,3 @@ void exec86 (uint32_t execloops) {
 		}
 	}
 }
-
